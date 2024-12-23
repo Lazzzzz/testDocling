@@ -1,3 +1,4 @@
+import asyncio
 import io
 import traceback
 from typing import Dict
@@ -15,29 +16,43 @@ app = FastAPI()
 converter = DocumentConverter()
 
 
-# ------------------------------------------------
-# Pydantic Models: for success and error responses
-# ------------------------------------------------
-
 class DocumentSuccessResponse(BaseModel):
-    """
-    Represents a successful response containing
-    the text of the processed OceerDocument.
-    """
     oceer_document: Dict
 
 
 class ErrorResponse(BaseModel):
-    """
-    Represents an error response containing
-    a description of what went wrong.
-    """
     error: str
 
 
-# --------------------------------------------------------------------
-# Endpoint to accept a PDF via file upload and process it accordingly
-# --------------------------------------------------------------------
+def convert_pdf_sync(file_bytes: bytes, filename: str) -> OceerDocument:
+    """
+    Fonction synchrone qui gère la lecture du PDF,
+    la conversion docling et la génération d'un OceerDocument.
+    """
+    # Lire le PDF
+    stream = io.BytesIO(file_bytes)
+    pdf_reader = PdfReader(stream)
+
+    total_pages = len(pdf_reader.pages)
+    if total_pages == 0:
+        raise ValueError("Uploaded PDF is empty.")
+
+    # Remettre le curseur du stream au début
+    stream.seek(0)
+
+    # Convertir via docling
+    doc = DocumentStream(name=filename, stream=stream)
+    conversion_result = converter.convert(doc)
+
+    # Construire l'OceerDocument
+    document = OceerDocument()
+    for page_no in range(1, total_pages + 1):
+        page_markdown = conversion_result.document.export_to_markdown(page_no=page_no)
+        document.page_text.append(page_markdown)
+
+    return document
+
+
 @app.post(
     "/process-pdf",
     responses={
@@ -47,52 +62,28 @@ class ErrorResponse(BaseModel):
     },
 )
 async def process_pdf(uploaded_file: UploadFile = File(...)):
-    """
-    Receives a PDF file upload, extracts text using the docling library,
-    and returns the processed document as JSON.
-    """
-
     try:
-        # Read the uploaded file into a BytesIO stream
         file_bytes = await uploaded_file.read()
         if not file_bytes:
             raise HTTPException(status_code=400, detail="No file content provided.")
 
-        stream = io.BytesIO(file_bytes)
-        pdf_reader = PdfReader(stream)
+        # On exécute la partie bloquante (lecture & conversion PDF) dans un thread séparé
+        loop = asyncio.get_event_loop()
+        document = await loop.run_in_executor(
+            None,
+            convert_pdf_sync,
+            file_bytes,
+            uploaded_file.filename or "",
+        )
 
-        # If the PDF has no pages, handle gracefully
-        total_pages = len(pdf_reader.pages)
-        if total_pages == 0:
-            raise HTTPException(status_code=400, detail="Uploaded PDF is empty.")
-
-        # Reset stream position after reading
-        stream.seek(0)
-
-        # Convert the PDF to a DocumentStream (required by docling)
-        doc = DocumentStream(name=uploaded_file.filename or "", stream=stream)
-        conversion_result = converter.convert(doc)
-
-        # Build an OceerDocument from the converted data
-        document = OceerDocument()
-        for page_no in range(1, total_pages + 1):
-            page_markdown = conversion_result.document.export_to_markdown(page_no=page_no)
-            document.page_text.append(page_markdown)
-
-        # Return a well-structured success response
         return DocumentSuccessResponse(oceer_document=document.to_json())
 
     except HTTPException as http_exc:
-        # If we intentionally raised an HTTPException (e.g., 400), re-raise it.
         raise http_exc
 
     except Exception as exc:
-        # Capture full traceback for logging/debugging
         error_trace = traceback.format_exc()
-        # In production, consider logging instead of printing
         print(f"Exception in process_pdf: {error_trace}")
-
-        # Return a standardized 500 response with some error detail
         return JSONResponse(
             status_code=500,
             content={"error": f"An unexpected error occurred: {str(exc)}"},
