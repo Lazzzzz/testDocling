@@ -1,2 +1,5 @@
 fastapi
 uvicorn
+docling
+PyPDF2
+pydantic
