@@ -9,5 +9,6 @@ ENV APP_HOME /root
 WORKDIR $APP_HOME
 COPY /app $APP_HOME/app
 
-EXPOSE 8080
+
+ENV PORT 8080
 CMD exec uvicorn server:app --host 0.0.0.0 --port ${PORT}
